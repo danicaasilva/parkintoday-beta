@@ -1,169 +1,97 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as Device from "expo-device";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as WebBrowser from "expo-web-browser";
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
-  AppState,
   Pressable,
+  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 
+/**
+ * Confirm Parking / Initial Payment Page
+ *
+ * - Single "Pay Now" flow using the initial payment link (first link).
+ * - After the user visits the link, show a confirmation popup:
+ *     "Did you complete the payment successfully?"
+ *     - Yes -> save local state "confirmed" and navigate to arrival-countdown.
+ *     - No  -> stay on this page (allow refresh/check later).
+ *
+ * - Displays professional-looking booking details card and a clean CTA.
+ * - Shows "₹50 per hour" (note: for testing arrival countdown uses 1 minute).
+ *
+ * Color system:
+ * - Primary / Accent: #0D1B2A
+ * - Background: #FFFFFF
+ * - Neutral: #C4C4C4
+ *
+ * Notes:
+ * - In production this should verify payment using a backend/webhook. This is a test-friendly UX.
+ */
+
+const INITIAL_PAYMENT_URL = "https://rzp.io/rzp/KCcEu6nd";
+
 const COLORS = {
-  bg: "#ffffff",
-  text: "#0f172a",
-  muted: "#6b7280",
-  primary: "#10b981",
-  success: "#22c55e",
-  border: "#e5e7eb",
-  razorpay: "#3395ff",
+  primary: "#0D1B2A",
+  background: "#FFFFFF",
+  neutral: "#C4C4C4",
+  success: "#10B981", // subtle green tinge from index
+  border: "#E9EDF1",
 };
 
-// Payment URLs
-const INITIAL_PAYMENT_URL = "https://rzp.io/rzp/KCcEu6nd";
-const FINAL_PAYMENT_URL = "https://rzp.io/rzp/CtOKslEs";
-
-// Storage keys
-const DEVICE_ID_KEY = "@device_id";
 const PAYMENT_STATE_KEY = "@parking_payment_state";
-const PAYMENT_TIMESTAMP_KEY = "@parking_payment_timestamp";
 
 export default function UpiScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
-  const [paymentStep, setPaymentStep] = useState<"initial" | "confirmed" | "completed">("initial");
-  const [isLoading, setIsLoading] = useState(true);
-  const [deviceId, setDeviceId] = useState<string>("");
-  const appState = useRef(AppState.currentState);
 
-  const spot = params.spotId
-    ? {
-      id: params.spotId as string,
-      name: params.spotName as string,
-      occupied: params.spotOccupied === "true",
-      temperature: parseInt(params.spotTemperature as string),
-      humidity: parseInt(params.spotHumidity as string),
-    }
-    : null;
+  const spotName = (params?.spotName as string) ?? "Selected Parking";
+  const availability = (params?.spotOccupied as string) === "true" ? "Occupied" : "Available";
+  const temp = params?.spotTemperature ?? "";
+  const humidity = params?.spotHumidity ?? "";
 
-  // Initialize on mount
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [paymentState, setPaymentState] = useState<string | null>(null);
+
   useEffect(() => {
-    initializeApp();
+    loadSavedState();
   }, []);
 
-  // Monitor app state changes (background/foreground)
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", handleAppStateChange);
-    return () => {
-      subscription.remove();
-    };
-  }, []);
-
-  const handleAppStateChange = async (nextAppState: any) => {
-    if (appState.current.match(/inactive|background/) && nextAppState === "active") {
-      // App has come to foreground - reload state
-      console.log("App came to foreground, reloading state...");
-      await loadPaymentState();
-    }
-    appState.current = nextAppState;
-  };
-
-  const initializeApp = async () => {
+  const loadSavedState = async () => {
     try {
-      // Get or create device ID
-      let storedDeviceId = await AsyncStorage.getItem(DEVICE_ID_KEY);
-
-      if (!storedDeviceId) {
-        const uniqueId = `${Device.modelName}_${Device.osName}_${Date.now()}`;
-        await AsyncStorage.setItem(DEVICE_ID_KEY, uniqueId);
-        storedDeviceId = uniqueId;
-      }
-
-      setDeviceId(storedDeviceId);
-      console.log("Device ID:", storedDeviceId);
-
-      // Load payment state
-      await loadPaymentState();
-    } catch (error) {
-      console.error("Error initializing app:", error);
-    } finally {
-      setIsLoading(false);
+      const s = await AsyncStorage.getItem(PAYMENT_STATE_KEY);
+      setPaymentState(s);
+    } catch (e) {
+      console.warn("Failed to read payment state", e);
     }
   };
 
-  const loadPaymentState = async () => {
-    try {
-      const savedState = await AsyncStorage.getItem(PAYMENT_STATE_KEY);
-      const savedTimestamp = await AsyncStorage.getItem(PAYMENT_TIMESTAMP_KEY);
-
-      console.log("Loaded state:", savedState);
-      console.log("Loaded timestamp:", savedTimestamp);
-
-      if (savedState) {
-        setPaymentStep(savedState as "initial" | "confirmed" | "completed");
-
-        // Check if we should auto-advance based on timestamp
-        if (savedTimestamp) {
-          const timestamp = parseInt(savedTimestamp);
-          const now = Date.now();
-          const timeDiff = now - timestamp;
-
-          // If payment was initiated less than 5 minutes ago and we're back in the app
-          // assume payment was successful
-          if (timeDiff < 5 * 60 * 1000) {
-            console.log(`Payment initiated ${Math.round(timeDiff / 1000)}s ago`);
-
-            if (savedState === "initial" && timeDiff > 10000) {
-              // If we're still in initial state but more than 10s have passed
-              // the user likely completed the payment
-              console.log("Auto-advancing to confirmed state");
-              await savePaymentState("confirmed");
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.error("Error loading payment state:", error);
-    }
-  };
-
-  const savePaymentState = async (state: "initial" | "confirmed" | "completed") => {
+  const saveState = async (state: "initial" | "confirmed" | "completed") => {
     try {
       await AsyncStorage.setItem(PAYMENT_STATE_KEY, state);
-      await AsyncStorage.setItem(PAYMENT_TIMESTAMP_KEY, Date.now().toString());
-      setPaymentStep(state);
-      console.log(`Payment state saved: ${state}`);
-    } catch (error) {
-      console.error("Error saving payment state:", error);
+      setPaymentState(state);
+    } catch (e) {
+      console.warn("Failed to save payment state", e);
     }
   };
 
-  const clearPaymentState = async () => {
+  const handlePayNow = async () => {
+    setIsProcessing(true);
+
     try {
-      await AsyncStorage.removeItem(PAYMENT_STATE_KEY);
-      await AsyncStorage.removeItem(PAYMENT_TIMESTAMP_KEY);
-      setPaymentStep("initial");
-      console.log("Payment state cleared");
-    } catch (error) {
-      console.error("Error clearing payment state:", error);
-    }
-  };
+      // Mark that user started payment flow locally
+      await saveState("initial");
 
-  const handleBookParkingSlot = async () => {
-    try {
-      console.log("Opening initial payment URL...");
-
-      // Save that we're starting the payment process
-      await savePaymentState("initial");
-
-      // Open the payment link
+      // Open the initial payment link in external browser
       await WebBrowser.openBrowserAsync(INITIAL_PAYMENT_URL);
 
-      // When browser closes, show confirmation
+      // After the browser is opened (and user returns), ask for confirmation.
+      // In production rely on server/webhook verification instead.
       setTimeout(() => {
         Alert.alert(
           "Payment Confirmation",
@@ -173,360 +101,239 @@ export default function UpiScreen() {
               text: "No",
               style: "cancel",
               onPress: () => {
-                // Keep in initial state
-                console.log("User cancelled payment");
-              }
+                // stay on page; user can refresh status later
+              },
             },
             {
               text: "Yes",
               onPress: async () => {
-                await savePaymentState("confirmed");
-              }
-            }
-          ]
-        );
-      }, 1000);
-    } catch (error) {
-      console.error("Error opening payment link:", error);
-      Alert.alert("Error", "Failed to open payment link. Please try again.");
-    }
-  };
-
-  const handleConfirmSlot = async () => {
-    try {
-      console.log("Opening final payment URL...");
-
-      // Save current timestamp
-      await AsyncStorage.setItem(PAYMENT_TIMESTAMP_KEY, Date.now().toString());
-
-      // Open the payment link
-      await WebBrowser.openBrowserAsync(FINAL_PAYMENT_URL);
-
-      // When browser closes, show confirmation
-      setTimeout(() => {
-        Alert.alert(
-          "Payment Confirmation",
-          "Did you complete the final payment successfully?",
-          [
-            {
-              text: "No",
-              style: "cancel",
-              onPress: () => {
-                console.log("User cancelled final payment");
-              }
+                setIsProcessing(true);
+                try {
+                  await saveState("confirmed");
+                  // Navigate to arrival countdown to start initial timer
+                  router.push({
+                    pathname: "/arrival-countdown",
+                    params: { spotName } as any,
+                  } as any);
+                } finally {
+                  setIsProcessing(false);
+                }
+              },
             },
-            {
-              text: "Yes",
-              onPress: async () => {
-                await savePaymentState("completed");
-              }
-            }
-          ]
+          ],
+          { cancelable: false }
         );
-      }, 1000);
+      }, 700);
     } catch (error) {
-      console.error("Error opening payment link:", error);
-      Alert.alert("Error", "Failed to open payment link. Please try again.");
+      console.error("Failed to open payment link:", error);
+      Alert.alert("Error", "Could not open payment link. Please try again.");
+    } finally {
+      setIsProcessing(false);
     }
   };
 
-  const handleBackToMap = () => {
-    clearPaymentState();
-    router.back();
+  const handleRefresh = async () => {
+    setIsProcessing(true);
+    await loadSavedState();
+    setTimeout(() => {
+      setIsProcessing(false);
+    }, 400);
   };
-
-  const handleManualRefresh = async () => {
-    setIsLoading(true);
-    await loadPaymentState();
-    setIsLoading(false);
-  };
-
-  if (isLoading) {
-    return (
-      <View style={[styles.container, { justifyContent: "center", alignItems: "center" }]}>
-        <Text style={styles.muted}>Loading...</Text>
-      </View>
-    );
-  }
 
   return (
-    <ScrollView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.h1}>Parking Slot Booking</Text>
-        <Pressable onPress={handleManualRefresh} style={styles.refreshBtn}>
-          <Text style={styles.refreshText}>🔄</Text>
-        </Pressable>
-      </View>
+    <SafeAreaView style={styles.safe}>
+      <ScrollView contentContainerStyle={styles.container}>
+        <View style={styles.headerRow}>
+          <Pressable onPress={() => router.back()} style={styles.backBtn}>
+            <Text style={styles.backText}>←</Text>
+          </Pressable>        
+        </View>
 
-      {/* Debug Info */}
-      {__DEV__ && (
-        <View style={styles.debugBox}>
-          <Text style={styles.debugText}>Device ID: {deviceId.substring(0, 30)}...</Text>
-          <Text style={styles.debugText}>Payment Step: {paymentStep}</Text>
-          <Pressable onPress={handleManualRefresh} style={styles.debugBtn}>
-            <Text style={styles.debugBtnText}>Refresh State</Text>
+        <Text style={styles.pageTitle}>Parking Slot Booking</Text>
+
+        <View style={styles.infoCard}>
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>Spot</Text>
+            <Text style={styles.infoValue}>{spotName}</Text>
+          </View>
+
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>Availability</Text>
+            <Text style={[styles.infoValue, availability === "Available" ? styles.available : styles.occupied]}>
+              {availability}
+            </Text>
+          </View>
+
+          {temp !== "" && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Temp</Text>
+              <Text style={styles.infoValue}>{temp}°C</Text>
+            </View>
+          )}
+
+          {humidity !== "" && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Humidity</Text>
+              <Text style={styles.infoValue}>{humidity}%</Text>
+            </View>
+          )}
+
+          <View style={styles.divider} />
+
+          <View style={styles.priceRow}>
+            <View>
+              <Text style={styles.smallMuted}>Initial Amount</Text>
+              <Text style={styles.largeAmount}>₹50</Text>
+            </View>
+
+            <View style={{ alignItems: "flex-end" }}>
+              <Text style={styles.smallMuted}>Rate</Text>
+              <View style={styles.rateRow}>
+                <Text style={styles.rateText}>₹50 / hour</Text>
+                <View style={styles.testTag}>
+                  <Text style={styles.testTagText}>Test: 1min = 1hr</Text>
+                </View>
+              </View>
+            </View>
+          </View>
+
+          <Text style={styles.hint}>
+            Initial payment reserves the slot for the arrival countdown. In production the server will verify payments —
+            this test flow asks for manual confirmation after visiting the payment page.
+          </Text>
+        </View>
+
+        <View style={styles.actions}>
+          <Pressable
+            onPress={handlePayNow}
+            style={({ pressed }) => [
+              styles.payBtn,
+              pressed && { opacity: 0.9 },
+              paymentState === "confirmed" && styles.payBtnConfirmed,
+            ]}
+            disabled={isProcessing || availability !== "Available"}
+          >
+            {isProcessing ? (
+              <ActivityIndicator color={COLORS.background} />
+            ) : (
+              <Text style={styles.payBtnText}>
+                {paymentState === "confirmed" ? "Payment Confirmed — Start Arrival" : "Pay Initial ₹50"}
+              </Text>
+            )}
+          </Pressable>
+
+          <Pressable onPress={handleRefresh} style={styles.refreshBtn}>
+            <Text style={styles.refreshText}>Refresh State</Text>
+          </Pressable>
+
+          <Pressable
+            onPress={() => {
+              // cancel and go back
+              router.back();
+            }}
+            style={styles.cancelLink}
+          >
+            <Text style={styles.cancelText}>Cancel and Go Back</Text>
           </Pressable>
         </View>
-      )}
 
-      {spot ? (
-        <>
-          <Text style={styles.row}>
-            <Text style={styles.label}>Spot:</Text> {spot.name}
-          </Text>
-          <Text style={styles.row}>
-            <Text style={styles.label}>Availability:</Text>{" "}
-            {spot.occupied ? "Occupied" : "Available"}
-          </Text>
-          <Text style={styles.row}>
-            <Text style={styles.label}>Temp:</Text> {spot.temperature}°C
-          </Text>
-          <Text style={styles.row}>
-            <Text style={styles.label}>Humidity:</Text> {spot.humidity}%
-          </Text>
-        </>
-      ) : (
-        <Text style={styles.muted}>No spot selected.</Text>
-      )}
-
-      <View style={{ height: 24 }} />
-
-      {/* Initial State - Book Parking Slot */}
-      {paymentStep === "initial" && (
-        <>
-          <Text style={styles.h2}>Ready to Book?</Text>
-          <Text style={styles.description}>
-            Click the button below to proceed with the initial payment for slot booking.
-          </Text>
-          <View style={{ height: 16 }} />
-
-          <Pressable
-            onPress={handleBookParkingSlot}
-            style={({ pressed }) => [
-              styles.btn,
-              { backgroundColor: COLORS.razorpay },
-              pressed && styles.btnPressed
-            ]}
-          >
-            <Text style={styles.btnText}>Book Parking Slot</Text>
-          </Pressable>
-
-          <View style={{ height: 16 }} />
-          <Text style={styles.helpText}>
-            💡 After completing payment, return to this screen and tap the refresh button (🔄) if the status doesn't update automatically.
-          </Text>
-        </>
-      )}
-
-      {/* After Initial Payment - Confirm Slot */}
-      {paymentStep === "confirmed" && (
-        <>
-          <View style={styles.successBox}>
-            <Text style={styles.successIcon}>✓</Text>
-            <Text style={styles.successText}>
-              Initial payment for slot booking done
-            </Text>
-          </View>
-
-          <View style={{ height: 24 }} />
-
-          <Text style={styles.h2}>Confirm Your Slot</Text>
-          <Text style={styles.description}>
-            Complete the final payment to confirm your parking slot.
-          </Text>
-          <View style={{ height: 16 }} />
-
-          <Pressable
-            onPress={handleConfirmSlot}
-            style={({ pressed }) => [
-              styles.btn,
-              { backgroundColor: COLORS.primary },
-              pressed && styles.btnPressed
-            ]}
-          >
-            <Text style={styles.btnText}>Confirm Slot</Text>
-          </Pressable>
-
-          <View style={{ height: 16 }} />
-          <Text style={styles.helpText}>
-            💡 After completing payment, return to this screen and tap the refresh button (🔄) if the status doesn't update automatically.
-          </Text>
-        </>
-      )}
-
-      {/* After Final Payment - Completed */}
-      {paymentStep === "completed" && (
-        <>
-          <View style={styles.successBox}>
-            <Text style={styles.successIcon}>✓</Text>
-            <Text style={styles.successText}>
-              Actual payment is done
-            </Text>
-          </View>
-
-          <View style={{ height: 24 }} />
-
-          <Text style={styles.completionMessage}>
-            🎉 Your parking slot has been successfully booked and confirmed!
-          </Text>
-
-          <View style={{ height: 24 }} />
-
-          <Pressable
-            onPress={handleBackToMap}
-            style={({ pressed }) => [
-              styles.btn,
-              { backgroundColor: COLORS.success },
-              pressed && styles.btnPressed
-            ]}
-          >
-            <Text style={styles.btnText}>Back to Map</Text>
-          </Pressable>
-        </>
-      )}
-
-      <View style={{ height: 24 }} />
-
-      {paymentStep !== "completed" && (
-        <Pressable
-          onPress={() => {
-            clearPaymentState();
-            router.back();
-          }}
-          style={({ pressed }) => [styles.link, pressed && { opacity: 0.7 }]}
-        >
-          <Text style={styles.linkText}>Cancel and Go Back</Text>
-        </Pressable>
-      )}
-
-      <View style={{ height: 32 }} />
-    </ScrollView>
+        <View style={styles.footer}>
+          <Text style={styles.footerMuted}>Device state & payment status are stored locally for this demo.</Text>
+          <Text style={styles.footerMuted}>Saved state: {paymentState ?? "none"}</Text>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: COLORS.background },
   container: {
-    flex: 1,
-    backgroundColor: COLORS.bg,
-    padding: 16
+    padding: 20,
+    backgroundColor: COLORS.background,
+    minHeight: "100%",
+    alignItems: "stretch",
   },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+
+  headerRow: { flexDirection: "row", alignItems: "center", marginBottom: 8 },
+  backBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
     alignItems: "center",
-    marginBottom: 12,
+    justifyContent: "center",
+    marginRight: 8,
   },
-  refreshBtn: {
-    padding: 8,
+  backText: { color: COLORS.primary, fontSize: 18 },
+  headerTitle: { fontSize: 18, color: COLORS.primary, fontWeight: "600" },
+
+  pageTitle: { marginTop: 6, fontSize: 28, color: COLORS.primary, fontWeight: "800", marginBottom: 12 },
+
+  infoCard: {
+    backgroundColor: COLORS.background,
+    borderRadius: 14,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.03,
+    shadowRadius: 10,
+    elevation: 2,
   },
-  refreshText: {
-    fontSize: 24,
+  infoRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 6 },
+  infoLabel: { color: COLORS.neutral, fontSize: 13 },
+  infoValue: { color: COLORS.primary, fontSize: 15, fontWeight: "700" },
+  available: { color: COLORS.primary },
+  occupied: { color: "#EF4444" },
+
+  divider: { height: 1, backgroundColor: COLORS.border, marginVertical: 12 },
+
+  priceRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  smallMuted: { color: COLORS.neutral, fontSize: 12, marginBottom: 6 },
+  largeAmount: { fontSize: 28, color: COLORS.primary, fontWeight: "900" },
+  rateRow: { flexDirection: "row", alignItems: "center" },
+  rateText: { color: COLORS.primary, fontWeight: "700" },
+  testTag: {
+    marginLeft: 8,
+    backgroundColor: "#ECFDF5",
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 10,
   },
-  h1: {
-    fontWeight: "600",
-    fontSize: 28,
-    color: COLORS.text,
-  },
-  h2: {
-    fontWeight: "600",
-    fontSize: 22,
-    color: COLORS.text,
-    marginBottom: 8,
-  },
-  row: {
-    fontWeight: "400",
-    fontSize: 16,
-    color: COLORS.text,
-    marginBottom: 6,
-  },
-  label: {
-    fontWeight: "600",
-    color: COLORS.muted,
-  },
-  muted: {
-    fontWeight: "400",
-    color: COLORS.muted,
-  },
-  description: {
-    fontSize: 14,
-    color: COLORS.muted,
-    lineHeight: 20,
-  },
-  helpText: {
-    fontSize: 12,
-    color: COLORS.muted,
-    lineHeight: 18,
-    fontStyle: "italic",
-    textAlign: "center",
-  },
-  btn: {
+  testTagText: { color: COLORS.success, fontSize: 11, fontWeight: "700" },
+
+  hint: { color: COLORS.neutral, marginTop: 12, fontSize: 13, lineHeight: 18 },
+
+  actions: { marginTop: 20, alignItems: "center" },
+  payBtn: {
+    width: "100%",
+    backgroundColor: COLORS.primary,
     paddingVertical: 14,
     borderRadius: 12,
     alignItems: "center",
   },
-  btnPressed: {
-    opacity: 0.8
+  payBtnConfirmed: {
+    backgroundColor: COLORS.success,
   },
-  btnText: {
-    color: "#ffffff",
-    fontWeight: "600",
-    fontSize: 16,
-  },
-  link: {
-    marginTop: 16,
-    alignItems: "center"
-  },
-  linkText: {
-    color: COLORS.muted,
-    fontWeight: "600"
-  },
-  successBox: {
-    backgroundColor: "#f0fdf4",
-    borderWidth: 2,
-    borderColor: COLORS.success,
+  payBtnText: { color: COLORS.background, fontSize: 16, fontWeight: "800" },
+
+  refreshBtn: {
+    marginTop: 12,
+    width: "100%",
+    paddingVertical: 12,
     borderRadius: 12,
-    padding: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
     alignItems: "center",
   },
-  successIcon: {
-    fontSize: 48,
-    color: COLORS.success,
-    marginBottom: 8,
-  },
-  successText: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: COLORS.success,
-    textAlign: "center",
-  },
-  completionMessage: {
-    fontSize: 16,
-    color: COLORS.text,
-    textAlign: "center",
-    lineHeight: 24,
-  },
-  debugBox: {
-    backgroundColor: "#f3f4f6",
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 16,
-  },
-  debugText: {
-    fontSize: 12,
-    color: COLORS.muted,
-    fontFamily: "monospace",
-    marginBottom: 4,
-  },
-  debugBtn: {
-    backgroundColor: COLORS.primary,
-    padding: 8,
-    borderRadius: 6,
-    marginTop: 8,
-    alignItems: "center",
-  },
-  debugBtnText: {
-    color: "#ffffff",
-    fontSize: 12,
-    fontWeight: "600",
-  },
+  refreshText: { color: COLORS.primary, fontWeight: "700" },
+
+  cancelLink: { marginTop: 18, alignItems: "center" },
+  cancelText: { color: COLORS.neutral, fontWeight: "700" },
+
+  footer: { marginTop: 18, alignItems: "center" },
+  footerMuted: { color: COLORS.neutral, fontSize: 12 },
 });
